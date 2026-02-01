@@ -50,10 +50,25 @@ install_dependencies() {
     print_header "Installing System Dependencies"
     
     apt update
+    
+    # Check Python version
+    PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}' | cut -d. -f1,2)
+    print_info "Detected Python version: $PYTHON_VERSION"
+    
+    # Install Python 3.11 if Python 3.13 is installed (compatibility issue)
+    if [ "$PYTHON_VERSION" = "3.13" ]; then
+        print_warning "Python 3.13 detected. Installing Python 3.11 for compatibility..."
+        apt install -y software-properties-common
+        add-apt-repository -y ppa:deadsnakes/ppa
+        apt update
+        apt install -y python3.11 python3.11-venv python3.11-dev
+        PYTHON_CMD="python3.11"
+    else
+        apt install -y python3 python3-pip python3-venv python3-dev
+        PYTHON_CMD="python3"
+    fi
+    
     apt install -y \
-        python3 \
-        python3-pip \
-        python3-venv \
         sqlite3 \
         libsqlite3-dev \
         build-essential \
@@ -63,6 +78,7 @@ install_dependencies() {
         ufw
     
     print_info "Dependencies installed successfully"
+    print_info "Using Python command: $PYTHON_CMD"
 }
 
 setup_firewall() {
@@ -115,8 +131,8 @@ install_application() {
         exit 1
     fi
     
-    # Create Python virtual environment
-    python3 -m venv $INSTALL_DIR/venv
+    # Create Python virtual environment with the right Python version
+    $PYTHON_CMD -m venv $INSTALL_DIR/venv
     
     # Install Python dependencies
     $INSTALL_DIR/venv/bin/pip install --upgrade pip
