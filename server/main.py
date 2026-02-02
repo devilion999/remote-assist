@@ -487,6 +487,56 @@ async def get_smtp_config(current_user: dict = Depends(verify_token)):
         "require_auth": bool(config['require_auth'])
     }
 
+@app.post("/api/smtp/test")
+async def test_smtp(config: SMTPConfig, current_user: dict = Depends(verify_token)):
+    """Test SMTP connection (admin only)"""
+    if current_user['role'] != 'admin':
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        # Test connection
+        if config.security_type == 'SSL':
+            server = smtplib.SMTP_SSL(config.smtp_host, config.smtp_port, timeout=10)
+        else:
+            server = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=10)
+            if config.security_type == 'TLS':
+                server.starttls()
+        
+        # Test authentication
+        if config.require_auth:
+            server.login(config.username, config.password)
+        
+        # Send test email to admin
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = "SMTP Test - Remote Access System"
+        msg['From'] = config.from_email
+        msg['To'] = current_user['email']
+        
+        html_body = """
+        <html>
+        <body>
+            <h2>✓ SMTP Configuration Test Successful</h2>
+            <p>Your SMTP settings are working correctly!</p>
+            <p>This is a test email from Remote Access System.</p>
+        </body>
+        </html>
+        """
+        msg.attach(MIMEText(html_body, 'html'))
+        
+        server.send_message(msg)
+        server.quit()
+        
+        return {
+            "success": True,
+            "message": f"SMTP test successful! Test email sent to {current_user['email']}"
+        }
+    except smtplib.SMTPAuthenticationError:
+        raise HTTPException(status_code=400, detail="Authentication failed. Check username and password.")
+    except smtplib.SMTPConnectError:
+        raise HTTPException(status_code=400, detail="Cannot connect to SMTP server. Check host and port.")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"SMTP test failed: {str(e)}")
+
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_session(session_data: SessionCreate, current_user: dict = Depends(verify_token)):
     conn = get_db()
