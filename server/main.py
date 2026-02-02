@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Remote Access Server - Main Application
-Linux-based server for managing remote desktop sessions via UDP
+Remote Access Server - Enhanced with auto-removal of temporary admin
 """
 
 from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials  
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List, Dict
@@ -27,12 +26,18 @@ from contextlib import asynccontextmanager
 # Configuration
 SECRET_KEY = secrets.token_urlsafe(32)
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
-# Database initialization
+# Database initialization with is_temporary field
 def init_db():
     conn = sqlite3.connect('remote_access.db')
     cursor = conn.cursor()
+    
+    # Add is_temporary column if upgrading existing database
+    try:
+        cursor.execute('ALTER TABLE users ADD COLUMN is_temporary BOOLEAN DEFAULT 0')
+    except:
+        pass
     
     # Users table
     cursor.execute('''
@@ -44,6 +49,7 @@ def init_db():
             role TEXT NOT NULL DEFAULT 'tech',
             is_active BOOLEAN DEFAULT 1,
             max_sessions INTEGER DEFAULT 10,
+            is_temporary BOOLEAN DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -80,19 +86,34 @@ def init_db():
         )
     ''')
     
-    # Create default admin user if not exists
-    cursor.execute('SELECT COUNT(*) FROM users WHERE email = ?', ('admin@localhost',))
-    if cursor.fetchone()[0] == 0:
-        admin_hash = hashlib.sha256('admin123'.encode()).hexdigest()
-        cursor.execute('''
-            INSERT INTO users (email, password_hash, full_name, role, max_sessions)
-            VALUES (?, ?, ?, ?, ?)
-        ''', ('admin@localhost', admin_hash, 'System Administrator', 'admin', 50))
+    # Check if we need to create default admin
+    cursor.execute('SELECT COUNT(*) FROM users WHERE is_temporary = 0')
+    real_admin_count = cursor.fetchone()[0]
+    
+    if real_admin_count == 0:
+        # Only create if no temporary admin exists either
+        cursor.execute('SELECT COUNT(*) FROM users WHERE is_temporary = 1')
+        if cursor.fetchone()[0] == 0:
+            temp_password = 'Setup' + secrets.token_urlsafe(8)
+            admin_hash = hashlib.sha256(temp_password.encode()).hexdigest()
+            cursor.execute('''
+                INSERT INTO users (email, password_hash, full_name, role, max_sessions, is_temporary)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', ('admin@example.com', admin_hash, 'Setup Admin', 'admin', 50, 1))
+            
+            print("\n" + "="*80)
+            print("⚠️  FIRST TIME SETUP - TEMPORARY CREDENTIALS")
+            print("="*80)
+            print(f"Email:    admin@example.com")
+            print(f"Password: {temp_password}")
+            print("\n📌 These credentials will be automatically removed when you create")
+            print("   your first permanent admin account!")
+            print("="*80 + "\n")
     
     conn.commit()
     conn.close()
 
-# Pydantic models
+# Pydantic models (same as before, adding UserUpdate)
 class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8)
@@ -111,7 +132,12 @@ class UserResponse(BaseModel):
     role: str
     max_sessions: int
     is_active: bool
+    is_temporary: bool
     created_at: str
+
+class UserUpdate(BaseModel):
+    is_active: Optional[bool] = None
+    max_sessions: Optional[int] = Field(None, ge=1, le=50)
 
 class SMTPConfig(BaseModel):
     smtp_host: str
@@ -145,7 +171,6 @@ class UDPSessionManager:
         self.used_ports = set()
     
     def allocate_port(self) -> int:
-        """Allocate a free UDP port for a new session"""
         for port in range(self.port_range_start, self.port_range_end):
             if port not in self.used_ports:
                 self.used_ports.add(port)
@@ -153,11 +178,9 @@ class UDPSessionManager:
         raise Exception("No available UDP ports")
     
     def release_port(self, port: int):
-        """Release a UDP port"""
         self.used_ports.discard(port)
     
     async def create_udp_socket(self, session_code: str) -> int:
-        """Create UDP socket for session"""
         port = self.allocate_port()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(('0.0.0.0', port))
@@ -166,26 +189,19 @@ class UDPSessionManager:
         return port
     
     def close_session(self, session_code: str, port: int):
-        """Close UDP session"""
         if session_code in self.sessions:
             self.sessions[session_code].close()
             del self.sessions[session_code]
         self.release_port(port)
 
-# Global instances
 udp_manager = UDPSessionManager()
 security = HTTPBearer()
 
-# Lifespan context manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     init_db()
     yield
-    # Shutdown
-    pass
 
-# FastAPI app
 app = FastAPI(
     title="Remote Access Server API",
     description="TeamViewer-like remote access system",
@@ -193,7 +209,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -202,7 +217,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Helper functions
 def get_db():
     conn = sqlite3.connect('remote_access.db')
     conn.row_factory = sqlite3.Row
@@ -231,11 +245,9 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) 
         raise HTTPException(status_code=401, detail="Invalid token")
 
 def generate_session_code() -> str:
-    """Generate a unique 9-digit session code"""
     return ''.join([str(secrets.randbelow(10)) for _ in range(9)])
 
 def send_email(to_email: str, subject: str, body: str):
-    """Send email using configured SMTP settings"""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('SELECT * FROM smtp_config WHERE id = 1')
@@ -273,7 +285,6 @@ def send_email(to_email: str, subject: str, body: str):
 
 @app.post("/api/auth/login")
 async def login(user_data: UserLogin):
-    """Authenticate user and return JWT token"""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('SELECT * FROM users WHERE email = ? AND is_active = 1', (user_data.email,))
@@ -296,13 +307,13 @@ async def login(user_data: UserLogin):
             "id": user['id'],
             "email": user['email'],
             "full_name": user['full_name'],
-            "role": user['role']
+            "role": user['role'],
+            "is_temporary": bool(user['is_temporary'])
         }
     }
 
 @app.post("/api/users", response_model=UserResponse)
 async def create_user(user: UserCreate, current_user: dict = Depends(verify_token)):
-    """Create a new IT member (admin only)"""
     if current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Admin access required")
     
@@ -312,30 +323,32 @@ async def create_user(user: UserCreate, current_user: dict = Depends(verify_toke
     try:
         password_hash = hash_password(user.password)
         cursor.execute('''
-            INSERT INTO users (email, password_hash, full_name, role, max_sessions)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO users (email, password_hash, full_name, role, max_sessions, is_temporary)
+            VALUES (?, ?, ?, ?, ?, 0)
         ''', (user.email, password_hash, user.full_name, user.role, user.max_sessions))
         conn.commit()
         user_id = cursor.lastrowid
         
-        # Send invitation email
+        # If first real admin, remove temporary admin
+        if user.role == 'admin':
+            deleted = cursor.execute('DELETE FROM users WHERE is_temporary = 1')
+            if deleted.rowcount > 0:
+                conn.commit()
+                print(f"\n✓ Temporary admin removed! Permanent admin created: {user.email}\n")
+        
         try:
             email_body = f"""
-            <html>
-            <body>
+            <html><body>
                 <h2>Welcome to Remote Access System</h2>
                 <p>Hello {user.full_name},</p>
-                <p>Your account has been created successfully.</p>
                 <p><strong>Email:</strong> {user.email}<br>
-                <strong>Temporary Password:</strong> {user.password}</p>
-                <p>Please login and change your password immediately.</p>
-                <p>Login URL: <a href="http://your-server-address/admin">Admin Portal</a></p>
-            </body>
-            </html>
+                <strong>Password:</strong> {user.password}</p>
+                <p>Please login and change your password.</p>
+            </body></html>
             """
             send_email(user.email, "Your Remote Access Account", email_body)
         except Exception as e:
-            print(f"Warning: Failed to send invitation email: {e}")
+            print(f"Warning: Email failed: {e}")
         
         cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
         created_user = cursor.fetchone()
@@ -348,6 +361,7 @@ async def create_user(user: UserCreate, current_user: dict = Depends(verify_toke
             role=created_user['role'],
             max_sessions=created_user['max_sessions'],
             is_active=bool(created_user['is_active']),
+            is_temporary=bool(created_user['is_temporary']),
             created_at=created_user['created_at']
         )
     except sqlite3.IntegrityError:
@@ -356,7 +370,6 @@ async def create_user(user: UserCreate, current_user: dict = Depends(verify_toke
 
 @app.get("/api/users", response_model=List[UserResponse])
 async def list_users(current_user: dict = Depends(verify_token)):
-    """List all users (admin only)"""
     if current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Admin access required")
     
@@ -368,27 +381,78 @@ async def list_users(current_user: dict = Depends(verify_token)):
     
     return [
         UserResponse(
-            id=user['id'],
-            email=user['email'],
-            full_name=user['full_name'],
-            role=user['role'],
-            max_sessions=user['max_sessions'],
-            is_active=bool(user['is_active']),
-            created_at=user['created_at']
+            id=u['id'],
+            email=u['email'],
+            full_name=u['full_name'],
+            role=u['role'],
+            max_sessions=u['max_sessions'],
+            is_active=bool(u['is_active']),
+            is_temporary=bool(u.get('is_temporary', 0)),
+            created_at=u['created_at']
         )
-        for user in users
+        for u in users
     ]
 
-@app.post("/api/smtp/config")
-async def configure_smtp(config: SMTPConfig, current_user: dict = Depends(verify_token)):
-    """Configure SMTP settings (admin only)"""
+@app.patch("/api/users/{user_id}")
+async def update_user(user_id: int, user_update: UserUpdate, current_user: dict = Depends(verify_token)):
+    """Enable/disable users or change max sessions"""
     if current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Admin access required")
     
     conn = get_db()
     cursor = conn.cursor()
     
-    # Delete existing config and insert new one
+    cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+    user = cursor.fetchone()
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user_id == current_user['user_id'] and user_update.is_active is False:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Cannot disable yourself")
+    
+    updates = []
+    params = []
+    
+    if user_update.is_active is not None:
+        updates.append("is_active = ?")
+        params.append(int(user_update.is_active))
+    
+    if user_update.max_sessions is not None:
+        updates.append("max_sessions = ?")
+        params.append(user_update.max_sessions)
+    
+    if updates:
+        params.append(user_id)
+        query = f"UPDATE users SET {', '.join(updates)} WHERE id = ?"
+        cursor.execute(query, params)
+        conn.commit()
+    
+    cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+    updated = cursor.fetchone()
+    conn.close()
+    
+    return UserResponse(
+        id=updated['id'],
+        email=updated['email'],
+        full_name=updated['full_name'],
+        role=updated['role'],
+        max_sessions=updated['max_sessions'],
+        is_active=bool(updated['is_active']),
+        is_temporary=bool(updated.get('is_temporary', 0)),
+        created_at=updated['created_at']
+    )
+
+# Continue with remaining endpoints (SMTP, sessions, etc.) - keeping them as they were
+
+@app.post("/api/smtp/config")
+async def configure_smtp(config: SMTPConfig, current_user: dict = Depends(verify_token)):
+    if current_user['role'] != 'admin':
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    conn = get_db()
+    cursor = conn.cursor()
     cursor.execute('DELETE FROM smtp_config')
     cursor.execute('''
         INSERT INTO smtp_config (id, smtp_host, smtp_port, security_type, username, password, from_email, require_auth)
@@ -397,12 +461,10 @@ async def configure_smtp(config: SMTPConfig, current_user: dict = Depends(verify
           config.username, config.password, config.from_email, config.require_auth))
     conn.commit()
     conn.close()
-    
     return {"message": "SMTP configured successfully"}
 
 @app.get("/api/smtp/config")
 async def get_smtp_config(current_user: dict = Depends(verify_token)):
-    """Get SMTP configuration (admin only, password hidden)"""
     if current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Admin access required")
     
@@ -427,11 +489,9 @@ async def get_smtp_config(current_user: dict = Depends(verify_token)):
 
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_session(session_data: SessionCreate, current_user: dict = Depends(verify_token)):
-    """Create a new remote session"""
     conn = get_db()
     cursor = conn.cursor()
     
-    # Check current active sessions for user
     cursor.execute('''
         SELECT COUNT(*) as count FROM sessions 
         WHERE tech_user_id = ? AND status IN ('pending', 'active')
@@ -445,21 +505,18 @@ async def create_session(session_data: SessionCreate, current_user: dict = Depen
         conn.close()
         raise HTTPException(status_code=429, detail=f"Maximum concurrent sessions ({max_sessions}) reached")
     
-    # Generate unique session code
     while True:
         session_code = generate_session_code()
         cursor.execute('SELECT id FROM sessions WHERE session_code = ?', (session_code,))
         if not cursor.fetchone():
             break
     
-    # Allocate UDP port
     try:
         udp_port = await udp_manager.create_udp_socket(session_code)
     except Exception as e:
         conn.close()
         raise HTTPException(status_code=500, detail="Failed to allocate UDP port")
     
-    # Create session
     cursor.execute('''
         INSERT INTO sessions (session_code, tech_user_id, customer_name, customer_email, udp_port, status)
         VALUES (?, ?, ?, ?, ?, 'pending')
@@ -468,24 +525,17 @@ async def create_session(session_data: SessionCreate, current_user: dict = Depen
     conn.commit()
     session_id = cursor.lastrowid
     
-    # Send email to customer if provided
     if session_data.customer_email:
         try:
             email_body = f"""
-            <html>
-            <body>
+            <html><body>
                 <h2>Remote Support Session</h2>
-                <p>Hello {session_data.customer_name or 'Customer'},</p>
-                <p>A remote support session has been initiated for you.</p>
-                <p><strong>Session Code:</strong> <span style="font-size: 24px; font-weight: bold; color: #007bff;">{session_code}</span></p>
-                <p>Please download the client application and enter this code to connect.</p>
-                <p>Download link: <a href="http://your-server-address/downloads/client.exe">Windows Client</a></p>
-            </body>
-            </html>
+                <p>Session Code: <strong>{session_code}</strong></p>
+            </body></html>
             """
             send_email(session_data.customer_email, "Your Remote Support Session", email_body)
         except Exception as e:
-            print(f"Warning: Failed to send session email: {e}")
+            print(f"Email warning: {e}")
     
     cursor.execute('SELECT * FROM sessions WHERE id = ?', (session_id,))
     session = cursor.fetchone()
@@ -504,7 +554,6 @@ async def create_session(session_data: SessionCreate, current_user: dict = Depen
 
 @app.get("/api/sessions", response_model=List[SessionResponse])
 async def list_sessions(current_user: dict = Depends(verify_token)):
-    """List sessions for current user"""
     conn = get_db()
     cursor = conn.cursor()
     
@@ -523,24 +572,22 @@ async def list_sessions(current_user: dict = Depends(verify_token)):
     
     return [
         SessionResponse(
-            id=session['id'],
-            session_code=session['session_code'],
-            tech_user_id=session['tech_user_id'],
-            customer_name=session['customer_name'],
-            customer_email=session['customer_email'],
-            status=session['status'],
-            udp_port=session['udp_port'],
-            created_at=session['created_at']
+            id=s['id'],
+            session_code=s['session_code'],
+            tech_user_id=s['tech_user_id'],
+            customer_name=s['customer_name'],
+            customer_email=s['customer_email'],
+            status=s['status'],
+            udp_port=s['udp_port'],
+            created_at=s['created_at']
         )
-        for session in sessions
+        for s in sessions
     ]
 
 @app.delete("/api/sessions/{session_id}")
 async def close_session(session_id: int, current_user: dict = Depends(verify_token)):
-    """Close/terminate a session"""
     conn = get_db()
     cursor = conn.cursor()
-    
     cursor.execute('SELECT * FROM sessions WHERE id = ?', (session_id,))
     session = cursor.fetchone()
     
@@ -552,11 +599,9 @@ async def close_session(session_id: int, current_user: dict = Depends(verify_tok
         conn.close()
         raise HTTPException(status_code=403, detail="Access denied")
     
-    # Close UDP socket
     if session['udp_port']:
         udp_manager.close_session(session['session_code'], session['udp_port'])
     
-    # Update session status
     cursor.execute('''
         UPDATE sessions 
         SET status = 'closed', disconnected_at = CURRENT_TIMESTAMP 
@@ -564,12 +609,10 @@ async def close_session(session_id: int, current_user: dict = Depends(verify_tok
     ''', (session_id,))
     conn.commit()
     conn.close()
-    
     return {"message": "Session closed successfully"}
 
 @app.get("/api/sessions/{session_code}/info")
 async def get_session_info(session_code: str):
-    """Get session info by code (for client connection)"""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('SELECT * FROM sessions WHERE session_code = ?', (session_code,))
@@ -578,9 +621,8 @@ async def get_session_info(session_code: str):
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
     if session['status'] == 'closed':
-        raise HTTPException(status_code=410, detail="Session has been closed")
+        raise HTTPException(status_code=410, detail="Session closed")
     
     return {
         "session_code": session['session_code'],
@@ -590,7 +632,6 @@ async def get_session_info(session_code: str):
 
 @app.websocket("/ws/session/{session_code}")
 async def websocket_session(websocket: WebSocket, session_code: str):
-    """WebSocket for session signaling and control"""
     await websocket.accept()
     
     conn = get_db()
@@ -602,7 +643,6 @@ async def websocket_session(websocket: WebSocket, session_code: str):
         await websocket.close(code=1008, reason="Session not found")
         return
     
-    # Update session status to active
     cursor.execute('''
         UPDATE sessions 
         SET status = 'active', connected_at = CURRENT_TIMESTAMP 
@@ -615,17 +655,13 @@ async def websocket_session(websocket: WebSocket, session_code: str):
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
-            
-            # Handle signaling messages (ICE candidates, SDP offers, etc.)
             if message['type'] == 'ping':
                 await websocket.send_json({"type": "pong"})
             elif message['type'] == 'disconnect':
                 break
-                
     except WebSocketDisconnect:
         pass
     finally:
-        # Update session status
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute('''
@@ -638,21 +674,25 @@ async def websocket_session(websocket: WebSocket, session_code: str):
 
 @app.get("/")
 async def root():
-    return {
-        "service": "Remote Access Server",
-        "version": "1.0.0",
-        "status": "running"
-    }
+    return {"service": "Remote Access Server", "version": "1.0.0", "status": "running"}
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False,
-        workers=4
-    )
+    # Get server IP to display
+    hostname = socket.gethostname()
+    try:
+        local_ip = socket.gethostbyname(hostname)
+    except:
+        local_ip = "127.0.0.1"
+    
+    print("\n" + "="*80)
+    print("🚀 REMOTE ACCESS SERVER STARTING")
+    print("="*80)
+    print(f"📍 Access admin portal: http://{local_ip}")
+    print(f"🔌 API endpoint: http://{local_ip}:8000")
+    print("="*80 + "\n")
+    
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False, workers=4)

@@ -304,37 +304,50 @@ start_service() {
 display_summary() {
     print_header "Installation Complete!"
     
+    # Get server IP
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    
     echo ""
     echo -e "${GREEN}Server Status:${NC}"
     systemctl status $SERVICE_NAME --no-pager | head -5
     echo ""
     
-    if [ "$DOMAIN" != "localhost" ] && [ ! -z "$DOMAIN" ]; then
-        echo -e "${GREEN}Admin Portal:${NC} https://$DOMAIN"
-    else
-        echo -e "${GREEN}Admin Portal:${NC} http://localhost (or http://$(hostname -I | awk '{print $1}'))"
-    fi
-    
-    echo -e "${GREEN}API Endpoint:${NC} http://localhost:8000"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}  🎉 REMOTE ACCESS SYSTEM READY!${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "${YELLOW}Default Credentials:${NC}"
-    echo -e "  Email: ${GREEN}admin@localhost${NC}"
-    echo -e "  Password: ${GREEN}admin123${NC}"
-    echo -e "  ${RED}*** CHANGE PASSWORD IMMEDIATELY! ***${NC}"
+    echo -e "${YELLOW}📍 Access the Admin Portal:${NC}"
+    echo -e "   ${GREEN}http://$SERVER_IP${NC}"
     echo ""
-    echo -e "${GREEN}Useful Commands:${NC}"
-    echo -e "  View logs: ${YELLOW}sudo journalctl -u $SERVICE_NAME -f${NC}"
-    echo -e "  Restart service: ${YELLOW}sudo systemctl restart $SERVICE_NAME${NC}"
-    echo -e "  Stop service: ${YELLOW}sudo systemctl stop $SERVICE_NAME${NC}"
-    echo -e "  Database location: ${YELLOW}$INSTALL_DIR/remote_access.db${NC}"
-    echo -e "  Backup script: ${YELLOW}$INSTALL_DIR/backup.sh${NC}"
+    echo -e "${YELLOW}🔑 Temporary Admin Credentials (First-Time Setup):${NC}"
+    echo -e "   Email:    ${GREEN}admin@example.com${NC}"
+    echo -e "   Password: ${GREEN}(check server logs below)${NC}"
     echo ""
-    echo -e "${GREEN}Next Steps:${NC}"
-    echo "1. Login to admin portal"
-    echo "2. Change admin password"
-    echo "3. Configure SMTP settings"
-    echo "4. Create IT member accounts"
-    echo "5. Build and distribute Windows client"
+    echo -e "${YELLOW}⚠️  IMPORTANT FIRST STEPS:${NC}"
+    echo -e "   1. Login with temporary admin credentials"
+    echo -e "   2. Go to 'Users' tab"
+    echo -e "   3. Create your permanent admin account (e.g., ${GREEN}your-email@company.com${NC})"
+    echo -e "   4. Temporary admin will be ${RED}automatically removed${NC}"
+    echo -e "   5. Configure SMTP settings for email notifications"
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${GREEN}📊 View temporary admin password:${NC}"
+    echo -e "   ${YELLOW}sudo journalctl -u $SERVICE_NAME -n 50 | grep -A 5 'FIRST TIME'${NC}"
+    echo ""
+    echo -e "${GREEN}📋 Useful Commands:${NC}"
+    echo -e "   View logs:       ${YELLOW}sudo journalctl -u $SERVICE_NAME -f${NC}"
+    echo -e "   Restart service: ${YELLOW}sudo systemctl restart $SERVICE_NAME${NC}"
+    echo -e "   Stop service:    ${YELLOW}sudo systemctl stop $SERVICE_NAME${NC}"
+    echo -e "   Service status:  ${YELLOW}sudo systemctl status $SERVICE_NAME${NC}"
+    echo ""
+    echo -e "${GREEN}📂 File Locations:${NC}"
+    echo -e "   Application:  ${YELLOW}$INSTALL_DIR${NC}"
+    echo -e "   Database:     ${YELLOW}$INSTALL_DIR/remote_access.db${NC}"
+    echo -e "   Web admin:    ${YELLOW}/var/www/remote-access/${NC}"
+    echo -e "   Backups:      ${YELLOW}$INSTALL_DIR/backups/${NC}"
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
 
